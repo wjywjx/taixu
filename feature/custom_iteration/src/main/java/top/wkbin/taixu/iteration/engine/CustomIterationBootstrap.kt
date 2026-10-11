@@ -8,13 +8,18 @@ import java.io.File
  * 
  * 职责：
  * 1. 准备沙盒内隔离的源码工作区路径 `~/custom_taixu`；
- * 2. 将预置的 `taixu-custom-iteration` Skill 部署至 Agent 的技能目录；
- * 3. 部署 GitHub Actions CI 工作流模板；
+ * 2. 从 APK assets 读取预置的 `taixu-custom-iteration` Skill，并落盘到 Agent 的技能目录；
+ * 3. 从 APK assets 读取 GitHub Actions CI 工作流模板并落盘；
  * 4. 生成引导 Agent 执行自迭代开发的规范提示词。
+ *
+ * 目录布局与幂等写入由 [CustomIterationWorkspace] 承担（纯 JVM、可单测），
+ * 本对象只保留「读 assets + 编排 + 错误语义」这一层薄逻辑。
  */
 object CustomIterationBootstrap {
 
-    const val WORKSPACE_NAME = "custom_taixu"
+    /** 隔离工作区目录名，与 [CustomIterationWorkspace] 共用同一事实源。 */
+    const val WORKSPACE_NAME = CustomIterationWorkspace.WORKSPACE_NAME
+
     const val OFFICIAL_REPO = "https://github.com/wkbin/taixu"
 
     const val BOOTSTRAP_PROMPT = """我准备在太墟（TaiXu）的手机 Linux 虚拟沙盒中进行 TaiXu 自定义迭代。
@@ -49,41 +54,53 @@ object CustomIterationBootstrap {
 
     /**
      * 初始化自定义迭代环境与工作区。
+     *
+     * 不只是建目录：预置 Skill 与 CI 工作流模板必须真正写入，否则 Agent 拿到的是一个
+     * 「看起来就绪、实际无规范可读」的空壳工作区。
      */
-    fun bootstrap(context: Context, rootfsHomeDir: File): BootstrapResult {
-        try {
-            // 1. 创建隔离工作区目录
-            val workspaceDir = File(rootfsHomeDir, WORKSPACE_NAME)
-            if (!workspaceDir.exists()) {
-                workspaceDir.mkdirs()
-            }
+    fun bootstrap(context: Context, rootfsHomeDir: File): BootstrapResult = try {
+        val layout = CustomIterationWorkspace.layoutOf(rootfsHomeDir)
+        CustomIterationWorkspace.ensureDirectories(layout)
 
-            // 2. 部署 Skill 目录
-            val skillDir = File(rootfsHomeDir, ".taixu/skills/taixu-custom-iteration")
-            if (!skillDir.exists()) {
-                skillDir.mkdirs()
-            }
+        val skillMarkdown = readAssetOrNull(context, CustomIterationWorkspace.SKILL_ASSET_PATH)
+        val workflowTemplate =
+            readAssetOrNull(context, CustomIterationWorkspace.WORKFLOW_TEMPLATE_ASSET_PATH)
 
-            // 3. 部署工作流模板缓存目录
-            val templatesDir = File(rootfsHomeDir, ".taixu/templates/workflows")
-            if (!templatesDir.exists()) {
-                templatesDir.mkdirs()
-            }
+        val missingAssets = buildList {
+            if (skillMarkdown == null) add(CustomIterationWorkspace.SKILL_ASSET_PATH)
+            if (workflowTemplate == null) add(CustomIterationWorkspace.WORKFLOW_TEMPLATE_ASSET_PATH)
+        }
 
-            return BootstrapResult(
+        if (missingAssets.isNotEmpty()) {
+            // 资产缺失即部署失败：宁可直接报错，也不交付半成品工作区。
+            BootstrapResult(
+                success = false,
+                workspacePath = layout.workspaceDir.absolutePath,
+                prompt = "",
+                errorMessage = "缺少预置资产：${missingAssets.joinToString("、")}"
+            )
+        } else {
+            CustomIterationWorkspace.writeIfChanged(layout.skillFile, skillMarkdown)
+            CustomIterationWorkspace.writeIfChanged(layout.workflowTemplateFile, workflowTemplate)
+            BootstrapResult(
                 success = true,
-                workspacePath = workspaceDir.absolutePath,
+                workspacePath = layout.workspaceDir.absolutePath,
                 prompt = BOOTSTRAP_PROMPT
             )
-        } catch (e: Exception) {
-            return BootstrapResult(
-                success = false,
-                workspacePath = "",
-                prompt = "",
-                errorMessage = e.message ?: "Bootstrap failed"
-            )
         }
+    } catch (e: Exception) {
+        BootstrapResult(
+            success = false,
+            workspacePath = "",
+            prompt = "",
+            errorMessage = e.message ?: "Bootstrap failed"
+        )
     }
+
+    /** 读取 APK assets 文本；资产缺失或读取异常返回 null，由调用方统一转成部署失败。 */
+    private fun readAssetOrNull(context: Context, assetPath: String): String? =
+        runCatching { context.assets.open(assetPath).bufferedReader().use { it.readText() } }
+            .getOrNull()
 
     data class BootstrapResult(
         val success: Boolean,
