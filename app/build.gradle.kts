@@ -299,3 +299,10 @@ extensions.configure<ApplicationAndroidComponentsExtension> {
         }
     }
 }
+
+// [临时·仅本分支] 把 feature 模块的 JVM 单元测试挂到 CI 已有的 assembleDebug 上，
+// 以便在 GitHub Actions 上执行 `./gradlew :feature:custom_iteration:testDebugUnitTest`。
+// 本分支不参与 PR，合入的 feature 分支不包含此改动。
+tasks.matching { it.name == "assembleDebug" }.configureEach {
+    dependsOn(":feature:custom_iteration:testDebugUnitTest")
+}
